@@ -1,0 +1,718 @@
+---
+title: 'Practical: Differential gene expression analysis'
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+(This material was adapted from Michael Love's DESeq2 tutorial 2018)
+
+## Introduction
+
+We will work with human RNA-seq data from the study by Himes et al (2014) to investigate differential gene expression (DGE) under different experimental conditions. We will characterize transcriptomic changes in four primary human ASM cell lines that were treated with dexamethasone — a potent synthetic glucocorticoid (1 µM for 18 hours). 
+
+We will use R and Bioconductor statistical packages to research variation at gene level. RStudio NGS visualization technologies will be used to display gene expression differences and gene ontology to infer biological meaning of the findings.
+ 
+## Loading the dataset
+
+First, install the 'airway' Bioconductor package, which stores the dataset we want to analyse (http://bioconductor.org/packages/release/data/experiment/html/airway.html ). 
+
+```{r, message=FALSE, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("airway")
+
+```
+
+Load the dataset and store it in a new object.
+
+```{r message=FALSE, warning=FALSE} 
+
+# Load airway
+library("airway")
+
+# Check airway vignette
+#vignette("airway")
+
+# Load airway data
+data("airway")
+
+# Assign airway data to summarized experiment R object 
+se <- airway
+
+```
+
+## Creating a SummarisedExperiment object
+
+The airway dataset is stored in a 'SummarisedExperiment' object, which allows for data to be easily manipulated using DESeq2. 
+
+The figure below highlights the component parts of a SummarizedExperiment object.  The assay (pink block) contains the matrix of counts, the rowRanges (blue block) contains information about the genomic ranges and the colData (green block) contains information about the samples. The highlighted line in each block represents the first row (note that the first row of colData lines up with the first column of the assay).
+
+![Figure 1. Summarized experiment structure](images/summarisedExperiment.png)
+
+Let us explore the summarised experiment structure.
+
+Total sum of read counts:
+```{r message=FALSE, warning=FALSE} 
+colSums(assay(se))
+```
+
+List the first few lines of the SummarizedExperiment object:
+```{r message=FALSE, warning=FALSE} 
+head(assay(se), 3)
+```
+
+Get an overview of the genomic ranges for the genes in the experiment:
+```{r message=FALSE, warning=FALSE} 
+rowRanges(se)
+```
+
+List the metada contained in the ranges:
+```{r message=FALSE, warning=FALSE} 
+str(metadata(rowRanges(se)))
+```
+
+Obtain the annotation available for the experiment:
+```{r message=FALSE, warning=FALSE} 
+colData(se)
+```
+
+Check object attributes and class: 
+```{r message=FALSE, warning=FALSE} 
+attributes(se)
+class(se)
+```
+
+## Differential gene expression with DeSeq2
+
+DeSeq2 is one of the most widely used DGE packages. It is available at Bioconductor (https://bioconductor.org/packages/release/bioc/html/DESeq2.html) and you can install it as follows:
+
+```{r message=FALSE, eval=FALSE} 
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("DESeq2")
+```
+
+Once installed, load the package and inspect the treatment conditions:
+```{r message=FALSE, warning=FALSE} 
+# Load DeSeq2
+library("DESeq2")
+
+# Obtain the treatment labels
+se$dex
+```
+
+When we talk about differential gene expression we are looking for changes in expression caused by the treatment Vs control. 
+For DESeq2 analysis, we need to relevel the treatment factor such that the first level of the factor is the reference level (e.g. control, or untreated samples). This is because DeSeq2 will consider the first level as control and will perform pair-wise comparisons where the first factor is the reference and acts as denominator on the fold change variation.
+
+```{r message=FALSE, warning=FALSE} 
+# Releveling such that the untreated condition becomes the first:
+se$dex <- relevel(se$dex, "untrt")
+
+# The order of factors after relevel: 
+se$dex
+```
+
+As you can observe, the untreated condition 'untrt' came to the first position on the factor levels.
+
+Next, construct a DESeqDataSet data object:
+```{r message=FALSE, warning=FALSE} 
+dds <- DESeqDataSet(se, design = ~ 0+dex)
+```
+
+In essence we have the same data but now is a DeSeq2 data object:
+```{r message=FALSE, warning=FALSE} 
+colData(dds)
+```
+
+```{r message=FALSE, warning=FALSE} 
+head(assay(dds))
+```
+
+```{r message=FALSE, warning=FALSE} 
+rowRanges(dds)
+```
+
+```{r message=FALSE, warning=FALSE} 
+# Check object attributes and class
+attributes(dds)
+class(dds)
+```
+
+
+#  1. Visual exploration of the data
+
+There are two main paths on the RNA-seq differential expression analysis, first data exploration and second the proper DGE analysis. The initial visual exploration will involve normalising the data in different ways and plotting results to study the data distribution, correlation and clustering.
+
+![Figure 2. Count normalization](images/1.png)
+
+## Gene count filtering
+
+On our count table we have many genes with zero count. To reduce object size and computational time we can remove lowly expressed genes.
+
+Check counts on dds:
+```{r message=FALSE, warning=FALSE} 
+head(counts(dds))
+```
+
+Remove genes with less than 10 reads in all conditions. This will help DeSeq2 to perform faster. Furthermore, DeSeq2 DGE on lowly and highly expressed genes doesn't perform that well so it's better to eliminate them.
+
+```{r message=FALSE, warning=FALSE} 
+dds <- dds[ rowSums(counts(dds)) > 10, ]
+
+# Check counts on dds after filtering
+head(counts(dds))
+```
+
+## Normalisation
+
+### Sequencing depth normalisation
+
+Investigate different sequencing library sizes. DGE software will use this sequencing depth information to normalise between samples.
+```{r message=FALSE, warning=FALSE} 
+colSums(counts(dds)) 
+```
+
+Calculate the size factor and add it to the data set.
+```{r message=FALSE, warning=FALSE} 
+dds <- estimateSizeFactors(dds)
+sizeFactors(dds)
+```
+
+counts()  allows to immediately retrieve the **normalized** read counts.
+```{r message=FALSE, warning=FALSE} 
+counts_normalized  <- counts(dds, normalized = TRUE)
+```
+
+Now take a look at the sum of the total depth after normalization: 
+```{r message=FALSE, warning=FALSE} 
+colSums(counts(dds, normalized=TRUE))
+```
+
+Here are the normalised counts:
+```{r message=FALSE, warning=FALSE} 
+head(counts_normalized)
+```
+
+### Log2 transformation of read counts
+
+Log2 transformation of the data make normalization easily interpretable and comparable. Simply use the log2 function, after adding 1 pseudocount, to avoid taking the log of zero:
+
+```{r message=FALSE, warning=FALSE} 
+# Log^2^ normalization adding 1 pseudocount.
+counts_log_normalized <- log2(counts_normalized + 1)
+```
+
+Now, visualise the distribution of the data using boxplots before and after log2 normalisation:
+```{r message=FALSE, warning=FALSE} 
+par(mfrow=c(1,2)) # to plot  the  following  two  images side by side  each  other
+
+# first , boxplots  of non -transformed  read  counts (one  per  sample)
+boxplot(counts_normalized , notch = TRUE , las=2, cex.axis = 0.7,
+        main = "untransformed  read  counts", ylab = "read  counts")
+
+# box  plots  of log^2^ -transformed  read  counts
+boxplot(counts_log_normalized , notch = TRUE , las=2, cex.axis = 0.7,
+        main = "log2 -transformed  read  counts",
+        ylab = "log2(read  counts)")
+```
+
+## Data transformation
+
+When the expected amount of variance is approximately the same across different mean values, the data is said to be homoskedastic. For RNA-seq counts, however, the expected variance grows with the mean. 
+
+Let us explore whether this holds for our data. We will use the vsn package for this purpose.
+
+First, install the package:
+```{r message=FALSE, eval=FALSE} 
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("vsn")
+```
+
+Plot the mean counts against the standard deviation:
+```{r message=FALSE, warning=FALSE} 
+library(vsn)
+library(ggplot2)
+
+SdPlot <- meanSdPlot(counts_normalized, ranks = FALSE, plot = FALSE)  
+SdPlot$gg + ggtitle("sequencing depth normalized") + ylab("standard deviation")
+```
+
+The logarithm with a small pseudocount amplifies differences when the values are close to 0. The low count genes with low signal-to-noise ratio will overly contribute to sample-sample distances and PCA plots.
+```{r message=FALSE, warning=FALSE} 
+SdPlot_log <- meanSdPlot(counts_log_normalized, ranks = FALSE, plot = FALSE)
+SdPlot_log$gg + ggtitle("sequencing depth normalized log2(read counts)") + ylab("standard deviation")
+```
+
+We can also test this property of counts with simulated data. Let's generate Poisson counts in a range of lambda 0.1 to 100:
+```{r message=FALSE, warning=FALSE} 
+# Generate simulated counts:
+lambda <- 10^seq(from = -1, to = 2, length = 1000)
+cts <- matrix(rpois(1000*100, lambda), ncol = 100)
+
+# Standard deviation of each row against the mean on raw counts
+sim_SdPlot <- meanSdPlot(cts, ranks = FALSE, plot = FALSE)
+sim_SdPlot$gg + ggtitle("simulated data sequencing depth normalized)") + ylab("standard deviation")
+```
+
+Here is how the standard deviation of each row against the mean changes on log2 pseudocount transformed data:
+```{r message=FALSE, warning=FALSE} 
+log.cts.one <- log2(cts + 1)
+sim_SdPlot_log <- meanSdPlot(log.cts.one, ranks = FALSE, plot = FALSE)
+sim_SdPlot_log$gg + ggtitle("simulated data sequencing depth normalized log2(read counts)") + ylab("standard deviation")
+```
+
+## DeSeq2 data transformation
+
+As a solution, DESeq2 offers two transformations for count data that stabilize the variance across the mean: the variance stabilizing transformation (VST) for negative binomial data with a dispersion-mean trend (Anders and Huber, 2010), implemented in the vst function, and the regularized-logarithm transformation or rlog (Love, Huber, and Anders 2014).
+
+For genes with high counts, both the VST and the rlog will give a similar result to the ordinary log2 transformation of normalized counts. For genes with lower counts, however, the values are shrunken towards a middle value. The VST or rlog-transformed data then become approximately homoskedastic (more flat trend in the meanSdPlot), and can be used directly for computing distances between samples, making PCA plots, or as input to downstream methods which perform best with homoskedastic data.
+
+**Which transformation to choose?** The VST is much faster to compute and is less sensitive to high count outliers than the rlog. The rlog tends to work well on small datasets (n < 30), potentially outperforming VST when there is a wide range of sequencing depth across samples (an order of magnitude difference). It is therefore recommended to use VST for medium-to-large datasets (n > 30). You can perform both transformations and compare the meanSdPlot or PCA plots generated, as described below.
+
+**Note that the two transformations offered by DESeq2 are provided for applications other than differential testing.** For differential testing it is recommended that the DESeq function should be applied to raw counts, as described later in this workflow, which also takes into account the dependence of the variance of counts on the mean value during the dispersion estimation step.
+
++ **Variance stabilizing transformation**
+```{r message=FALSE, warning=FALSE} 
+vsd <- vst(dds, blind = FALSE)
+head(assay(vsd), 3)
+```
+
++ **The rlog**
+```{r message=FALSE, warning=FALSE} 
+rld <- rlog(dds, blind = FALSE)
+head(assay(rld), 3)
+```
+
+### Sample correlation using all the different data transformations
+
+We will study the correlation on the first two samples using different data transformations.
+
+```{r message=FALSE, warning=FALSE} 
+par(mfrow=c(2,2))
+# Raw data normalized by sequecning depth
+plot(counts_normalized [,1:2], cex=.1, main = "Normalized by sequecning depth")
+
+# Log^2^ normalization adding 1 pseudocount.
+plot(counts_log_normalized [,1:2], cex=.1, main = "Normalized log2(read counts)")
+
+# rlog transformed
+rlog_norm_counts <- assay(rld)
+plot(rlog_norm_counts[,1:2], cex=.1, main = "rlog transformed", xlim=c(0,18), ylim=c(0,18))
+
+# Variance stabilizing transformation
+vsd_norm_counts <- assay(vsd)
+plot(vsd_norm_counts[,1:2], cex=.1, main = "Variance stabilizing transformation", xlim=c(0,18), ylim=c(0,18))
+```
+
+## PCA and hierarchical clustering
+
+Scope: Identifying outlier samples and sources of variation in the data.
+
+![Figure 3. Clustering analysis](images/2.png)
+
+(a) Let's plot the correlation matrix and PCA on the entire dataset **using the VST transformed data**. 
+
+You will need the *pheatmap* and *RColorBrewer* packages, which you can install as follows:
+```{r message=FALSE, eval=FALSE} 
+install.packages("pheatmap")
+install.packages("RColorBrewer")
+```
+
+Sample distances with VST:
+```{r message=FALSE, warning=FALSE} 
+sampleDists_vsd <- dist(t(assay(vsd)))
+sampleDists_vsd
+```
+
+Transform sample distances to matrix:
+```{r message=FALSE, warning=FALSE} 
+sampleDistMatrix_vsd <- as.matrix( sampleDists_vsd )
+```
+
+Modify row names joining treatment and cell type:
+```{r message=FALSE, warning=FALSE} 
+rownames(sampleDistMatrix_vsd) <- paste( vsd$dex, vsd$cell, sep = " - " )
+```
+
+Remove column names:
+```{r message=FALSE, warning=FALSE} 
+colnames(sampleDistMatrix_vsd) <- NULL
+```
+
+Draw heatmap:
+```{r message=FALSE, warning=FALSE} 
+library(RColorBrewer)
+library(pheatmap)
+
+# Colors palette
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+# Draw heatmap
+heatmap <- pheatmap(sampleDistMatrix_vsd,
+              clustering_distance_rows = sampleDists_vsd,
+              clustering_distance_cols = sampleDists_vsd,
+              col = colors)
+```
+
+Plot PCA on cell type:
+```{r message=FALSE, warning=FALSE} 
+plotPCA(vsd, intgroup="cell")
+```
+
+Plot PCA on dexamethasone treatment:
+```{r message=FALSE, warning=FALSE} 
+plotPCA(vsd, intgroup="dex")
+```
+
+Plot PCA on cell type and dexamethasone treatment:
+```{r message=FALSE, warning=FALSE} 
+plotPCA(vsd, intgroup=c("dex", "cell"))
+```
+
+(b) Let's repeat the procedure, but this time **using the rlog transformed data**.
+
+Sample distances with rld:
+```{r message=FALSE, warning=FALSE} 
+sampleDists_rld <- dist(t(assay(rld)))
+sampleDists_rld
+```
+
+Plot heat map:
+```{r message=FALSE, warning=FALSE} 
+# Transform sample distances to matrix
+sampleDistMatrix_rld <- as.matrix( sampleDists_rld )
+# Modify row names joining treatment and cell type
+rownames(sampleDistMatrix_rld) <- paste( rld$dex, rld$cell, sep = " - " )
+# Remove col names
+colnames(sampleDistMatrix_rld) <- NULL
+# Colors palette
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+# Draw heatmap
+heatmap <- pheatmap(sampleDistMatrix_rld,
+              clustering_distance_rows = sampleDists_rld,
+              clustering_distance_cols = sampleDists_rld,
+              col = colors)
+```
+
+Plot PCA on cell type:
+```{r message=FALSE, warning=FALSE} 
+plotPCA(rld, intgroup="cell")
+```
+
+Plot PCA on dexamethasone treatment:
+```{r message=FALSE, warning=FALSE} 
+plotPCA(rld, intgroup="dex")
+```
+
+Plot PCA on cell type and dexamethasone treatment:
+```{r message=FALSE, warning=FALSE} 
+plotPCA(rld, intgroup=c("dex", "cell"))
+```
+
+#  2. Differential gene expression
+
+Now after the data exploration we can run the differential expression pipeline on the **raw counts** with a single call to the function DESeq. Note that this function automatically applies data normalisation and transformation methods. The null hypothesis is that there is no systematic difference between the average read count values of the different conditions for a given gene. We will calculate the fold change of read counts, assuming de differences in sequencing depth and variability. For out data we will like to test the effect of dexamethasone treatment versus the untreated cells (untreated used as denominator for the fold change calculation).
+
+![Figure 4. Modelling raw counts](images/3.png)
+
+Run the DESeq function on the data:
+```{r warning=FALSE} 
+dds_DGE <- DESeq(dds)
+```
+
+Mean-dispersion relationship: 
+```{r warning=FALSE} 
+plotDispEsts(dds_DGE)
+```
+
+## Building the results table
+
+Now we can extract the results for the selected contrast, just by calling results().
+
+![Figure 5. Testing for differential expression](images/4.png)
+
+Calling results() will build the base means across samples, log2 fold variation, standard errors, p value and p adjusted:
+```{r message=FALSE, warning=FALSE} 
+dds_DGE_results <- results(dds_DGE)
+head(dds_DGE_results)
+```
+
+The resulting object can be filtered like a data frame. We have 4023 significant genes with a p adjusted < 0.05.  
+```{r message=FALSE, warning=FALSE} 
+table(dds_DGE_results$padj < 0.05)
+```
+
+We can also access the metadata contained in the columns and check the pairwise contrast studied ():
+```{r message=FALSE, warning=FALSE} 
+mcols(dds_DGE_results, use.names = TRUE)
+```
+
+Summry of DGE:
+```{r message=FALSE, warning=FALSE}
+summary(dds_DGE_results)
+```
+
+Select significant genes with a p adjusted lower than 0.05:
+```{r message=FALSE, warning=FALSE}
+resSig <- subset(dds_DGE_results, padj < 0.05)
+```
+
+Order significant genes by p adjusted:
+```{r message=FALSE, warning=FALSE}
+resSig <- resSig[ order(resSig$padj),]
+```
+
+Order significant genes with the strongest down-regulation:
+```{r message=FALSE, warning=FALSE}
+head(resSig[ order(resSig$log2FoldChange),])
+```
+
+And with the strongest up-regulation:
+```{r message=FALSE, warning=FALSE}
+head(resSig[ order(resSig$log2FoldChange, decreasing = TRUE), ])
+```
+
+Save significant DGE results to file:
+```{r message=FALSE, warning=FALSE}
+write.table(resSig, file = "DESeq2_Sig_results_dex_Vs_untrt.txt", sep = "\t", quote = FALSE , row.names = FALSE)
+```
+
+# Exploratory plots
+
+Plots are the best tools to explain DGE and your report should include them selecting those that best describe your findings.
+
+![Figure 6. Summarized experiment structure](images/5.png)
+
+## Histogram of p-value frequencies
+
+```{r message=FALSE, warning=FALSE}
+hist(dds_DGE_results$pvalue , col = "blue",  xlab = "", , border = "white", ylab = "Frequency", breaks =0:40/40, main = "frequencies of p-values")
+```
+
+## Volcano plot
+
+The volcano plot helps us visualise significant differentially expressed genes by showing the log2 fold change and the significance (p-adjusted).
+
+```{r message=FALSE, warning=FALSE}
+library("dplyr")
+
+# Order results by padj:
+dds_DGE_results <- dds_DGE_results[order(dds_DGE_results$padj),]
+
+# Add labels for significance:
+results_order <- as.data.frame(dplyr::mutate(as.data.frame(dds_DGE_results), sig=ifelse(dds_DGE_results$padj<0.05, "FDR<0.05", "Not Sig")), row.names=rownames(dds_DGE_results))
+head(results_order)
+
+# Generate the volcano plot:
+volcanoP <- ggplot(results_order, ggplot2::aes(log2FoldChange, -log10(padj))) +
+  geom_point(ggplot2::aes(col = sig)) +
+  scale_color_manual(values = c("red", "black")) +
+  ggtitle("Significant genes Untr vs. dexamethasone")
+
+volcanoP
+
+```
+
+We can also annotate the plot with e.g. Ensembl gene IDs as follows:
+
+```{r message=FALSE, warning=FALSE}
+
+# Get ENSEMBL gene names
+# Grepel library helps to avoid overlap of gene names
+# install.packages("ggrepel")
+
+library(ggrepel)
+
+# Select genes that have log2 fold change higher than 2 and p adjusted lower than 0.05:
+DEgenes_DESeq <- results_order[which(abs(results_order$log2FoldChange) > log2(2) & results_order$padj < 0.05),]
+DEgenes_DESeq <- DEgenes_DESeq[order(DEgenes_DESeq$padj),]
+
+# Add this annotation to the plot:
+volcanoP + 
+  ggrepel::geom_text_repel(data=DEgenes_DESeq[1:20, ], aes(label=rownames(results_order)[1:20]))
+
+```
+
+## Heat maps
+
+Heat maps are useful if we want to understand whether the samples in the experiment can be grouped according to their expression profiles. E.g. we would expect samples to cluster by condition (untreated samples to be more similar to each other and different from treated ones), but some substructures within these larger groups may also arise and could be informative.
+
+Select the 20 most variable genes:
+```{r message=FALSE, warning=FALSE}
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 20)
+topVarGenes
+```
+
+Normalise with respect to mean and plot heat map:
+```{r message=FALSE, warning=FALSE}
+mat  <- assay(vsd)[ topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(vsd)[, c("cell","dex")])
+pheatmap(mat, annotation_col = anno)
+```
+
+## 4. Annotate results
+
+Our results data frame contains only ENSEMBL gene ID, but we need some more meaning full info. For that purpose we will add gene symbol, gene name, KEGG path and ENTREZ ID. We have seen in previous lectures how to do this using the DAVID database, but now we will do this programmatically using the *AnnotationDbi* package.
+
+Install and load the *AnnotationDbi* and *org.Hs.eg.db* packages: 
+```{r message=FALSE, eval=FALSE}
+BiocManager::install("AnnotationDbi")
+BiocManager::install("org.Hs.eg.db")
+```
+
+```{r message=FALSE, warning=FALSE}
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+# Check all the possible terms that could be retrieved with AnnotationDbi "mapsIds function":
+columns(org.Hs.eg.db)
+```
+
+Ordered significant genes:
+```{r message=FALSE, warning=FALSE}
+head(resSig)
+```
+
+Map IDs and add corresponding annotations to the results table:
+```{r message=FALSE, warning=FALSE}
+# Add gene symbol column:
+resSig$SYMBOL = mapIds(org.Hs.eg.db,
+                        keys=rownames(resSig), 
+                        column="SYMBOL",
+                        keytype="ENSEMBL",
+                        multiVals="first")
+
+# Add gene name column:
+resSig$GENENAME = mapIds(org.Hs.eg.db,
+                        keys=rownames(resSig), 
+                        column="GENENAME",
+                        keytype="ENSEMBL",
+                        multiVals="first")
+
+# Add functional path column:
+resSig$PATH = mapIds(org.Hs.eg.db,
+                        keys=rownames(resSig), 
+                        column="PATH",
+                        keytype="ENSEMBL",
+                        multiVals="first")
+
+# Add Entrez ID column:
+resSig$ENTREZID = mapIds(org.Hs.eg.db,
+                        keys=rownames(resSig), 
+                        column="ENTREZID",
+                        keytype="ENSEMBL",
+                        multiVals="first")
+
+# Add ENSEMBL column:
+resSig$ENSEMBL <- rownames(resSig)
+
+resSig_DF <- as.data.frame(resSig)
+
+# Save annotated data frame:
+write.table(resSig_DF, file=("Significant_DE_dex_trt_vs_untrt_metadata.txt"), row.names = F,col.names = TRUE, sep="\t")
+
+```
+
+## 4. Functional Gene Ontology (GO) analysis
+
+Several resources can be used for this purpose, including:
+
+Harvard Chan Bioinformatics Core (HBC) - https://github.com/hbctraining/DGE_workshop/blob/master/lessons/09_functional_analysis.md
+g:Profiler - http://biit.cs.ut.ee/gprofiler/index.cgi
+DAVID - http://david.abcc.ncifcrf.gov/tools.jsp
+clusterProfiler - http://bioconductor.org/packages/release/bioc/html/clusterProfiler.html
+
+Install the clusterProfiler package:
+```{r message=FALSE, eval=FALSE}
+BiocManager::install("clusterProfiler")
+```
+
+```{r message=FALSE, warning=FALSE}
+library("clusterProfiler")
+
+OrgDb <- org.Hs.eg.db # this is the human database, but you can also use other organisms
+
+# Get ENTREZID as vector:
+genes <- as.character(resSig$ENTREZID)
+
+# GeneOntology terms
+
+## Molecular function
+# In clusterProfiler, groupGO is designed for gene classification based on GO distribution at a specific level.
+ggo <- clusterProfiler::groupGO(gene     = genes,
+                                OrgDb    = OrgDb,
+                                ont      = "MF",     #MF , BP CC
+                                level    = 3,
+                                readable = TRUE)
+```
+
+The GO enrichment results:
+```{r message=FALSE, warning=FALSE}
+head(as.data.frame(ggo)[,-5])
+```
+
+Visualise a bar chart of enriched GO terms:
+```{r message=FALSE, warning=FALSE}
+barplot(ggo, drop=TRUE, showCategory=30, vertex.label.cex=0.8)
+```
+
+**GO over-representation test - Molecular function**
+```{r message=FALSE, warning=FALSE, fig.width=15}
+ego <- clusterProfiler::enrichGO(gene          = genes,
+                                 OrgDb         = OrgDb,
+                                 ont           = "MF",
+                                 pAdjustMethod = "BH",
+                                 pvalueCutoff  = 0.01,
+                                 qvalueCutoff  = 0.01, 
+                                 readable      = TRUE)
+
+dotplot(ego)
+```
+
+**Biological process**
+In clusterProfiler, groupGO is designed for gene classification based on GO distribution at a specific level.
+```{r message=FALSE, warning=FALSE}
+ggo <- clusterProfiler::groupGO(gene     = genes,
+                                OrgDb    = OrgDb,
+                                ont      = "BP",     #MF , BP CC
+                                level    = 3,
+                                readable = TRUE)
+head(as.data.frame(ggo)[,-5])
+
+barplot(ggo, drop=TRUE, showCategory=30, vertex.label.cex=0.8)
+```
+
+
+**GO over-representation test - Biological process**
+```{r message=FALSE, warning=FALSE}
+ego <- clusterProfiler::enrichGO(gene          = genes,
+                                 OrgDb         = OrgDb,
+                                 ont           = "BP",
+                                 pAdjustMethod = "BH",
+                                 pvalueCutoff  = 0.01,
+                                 qvalueCutoff  = 0.01, 
+                                 readable      = TRUE)
+
+
+barplot(ego, showCategory=30)
+```
+
+## Session Info
+
+We should always keep record of the R packages used and their versions. In some cases you could get different results with different package versions!
+
+```{r warning=FALSE}
+devtools::session_info()
+```
+
